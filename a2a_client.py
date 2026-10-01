@@ -51,10 +51,25 @@ def main():
     ap.add_argument("--task-id", default="", help="Explicit task ID (auto-generated if empty)")
     ap.add_argument("--status", help="Check status of this task ID instead of sending")
     ap.add_argument("--pending", action="store_true", help="List pending tasks on the server")
+    ap.add_argument("--group", help="Send a group chat message to all peers")
+    ap.add_argument("--history", action="store_true", help="Show group chat history")
+    ap.add_argument("--register-peer", nargs=2, metavar=("NICK", "URL"),
+                    help="Register a peer agent (nick and base URL)")
     args = ap.parse_args()
 
     if args.pending:
         print(json.dumps(call(args.to, "/tasks/pending"), indent=2))
+    elif args.history:
+        print(json.dumps(call(args.to, "/group/history"), indent=2))
+    elif args.group:
+        result = call(args.to, "/group/send",
+                      {"from": args.from_nick, "text": args.group}, method="POST")
+        print(json.dumps(result, indent=2))
+    elif args.register_peer:
+        nick, url = args.register_peer
+        result = call(args.to, "/peers/register",
+                      {"nick": nick, "url": url}, method="POST")
+        print(json.dumps(result, indent=2))
     elif args.status:
         print(json.dumps(call(args.to, f"/tasks/{args.status}"), indent=2))
     elif args.action:
@@ -69,7 +84,7 @@ def main():
         result = call(args.to, "/tasks", msg, method="POST")
         print(json.dumps(result, indent=2))
     else:
-        ap.error("need --action (send), --status (check), or --pending (list)")
+        ap.error("need --action (send), --status (check), --pending (list), --group (chat), --history, or --register-peer")
 
 
 if __name__ == "__main__":
