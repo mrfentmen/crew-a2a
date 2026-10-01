@@ -22,11 +22,33 @@ from urllib.parse import urlparse
 
 SECRET = os.environ.get("CREW_A2A_SECRET", "change-me-in-production")
 TASKS: dict = {}  # task_id -> task dict
+GROUP_LOG: list = []  # group chat messages
+PEERS: list = []  # list of {"nick": str, "url": str}
 
 
 def verify_sig(body: bytes, sig: str) -> bool:
     expected = hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, sig)
+
+
+def broadcast_to_peers(msg: dict, exclude_nick: str = ""):
+    """Forward a group message to all known peers."""
+    import urllib.request
+    body = json.dumps(msg).encode()
+    sig = hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
+    for peer in PEERS:
+        if peer["nick"] == exclude_nick:
+            continue
+        try:
+            req = urllib.request.Request(
+                peer["url"].rstrip("/") + "/group/receive", data=body, method="POST"
+            )
+            req.add_header("Content-Type", "application/json")
+            req.add_header("X-Crew-Sig", sig)
+            with urllib.request.urlopen(req, timeout=5):
+                pass
+        except Exception as e:
+            print(f"broadcast to {peer['nick']} failed: {e}", flush=True)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -49,10 +71,16 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             self._send(200, {"nick": self.nick, "capabilities": self.capabilities,
-                             "pending": sum(1 for t in TASKS.values() if t["status"] == "pending")})
+                             "pending": sum(1 for t in TASKS.values() if t["status"] == "pending"),
+                             "peers": [p["nick"] for p in PEERS]})
         elif parsed.path == "/tasks/pending":
             pending = [t for t in TASKS.values() if t["status"] == "pending"]
             self._send(200, {"tasks": pending})
+        elif parsed.path == "/group/history":
+            # Last 50 group messages.
+            self._send(200, {"messages": GROUP_LOG[-50:]})
+        elif parsed.path == "/peers":
+            self._send(200, {"peers": PEERS})
         elif parsed.path.startswith("/tasks/"):
             tid = parsed.path.split("/")[2]
             task = TASKS.get(tid)
@@ -107,6 +135,34 @@ class Handler(BaseHTTPRequestHandler):
                 task["result"] = msg["result"]
             print(f"[{self.nick}] task {tid} -> {task['status']}", flush=True)
             self._send(200, {"ok": True})
+        elif parsed.path == "/group/send":
+            # Group chat: store locally and broadcast to all peers.
+            entry = {
+                "from": msg.get("from", "unknown"),
+                "text": msg.get("text", ""),
+                "at": time.time(),
+            }
+            GROUP_LOG.append(entry)
+            print(f"[{self.nick}] group <{entry['from']}> {entry['text'][:60]}", flush=True)
+            broadcast_to_peers({"kind": "group", **entry}, exclude_nick=self.nick)
+            self._send(200, {"ok": True, "peers": len(PEERS)})
+        elif parsed.path == "/group/receive":
+            # Incoming broadcast from a peer — store, don't rebroadcast.
+            GROUP_LOG.append({
+                "from": msg.get("from", "unknown"),
+                "text": msg.get("text", ""),
+                "at": msg.get("at", time.time()),
+            })
+            self._send(200, {"ok": True})
+        elif parsed.path == "/peers/register":
+            # Register a peer: {"nick": "...", "url": "http://..."}
+            nick = msg.get("nick", "")
+            url = msg.get("url", "")
+            if nick and url:
+                PEERS[:] = [p for p in PEERS if p["nick"] != nick]
+                PEERS.append({"nick": nick, "url": url})
+                print(f"[{self.nick}] peer registered: {nick} -> {url}", flush=True)
+            self._send(200, {"peers": PEERS})
         else:
             self._send(404, {"error": "unknown path"})
 
